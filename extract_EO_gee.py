@@ -44,8 +44,14 @@ def get_dataset_handler(var: str):
     """Dynamically import the dataset handler module."""
     if var in ['cpc_tmax', 'cpc_tmin']:
         module_name = 'cpc'
-    elif 'nsidc' in var:
+    elif var in ['nsidc_surface', 'nsidc_rootzone']:
         module_name = 'nsidc'
+    elif var in ['esi_4wk', 'esi_12wk']:
+        module_name = 'esi'
+    elif var == 'viirs':
+        module_name = 'viirs'
+    elif var == 'aef':
+        module_name = 'aef'
     else:
         module_name = var
         
@@ -95,8 +101,15 @@ def process_gee_var(
     # so 2025 will be from nov 2025 to july 2026
     # we should read this from crop calendar
     # add a flag and get start/end from calendar at region level
-    date_from = f"{year}-11-01"
-    date_to = f"{year+1}-08-01" # Exclusive end date in EE
+    if var == 'aef':
+        # AEF gets passed year=0 from extract_EO, so we must use the global config years.
+        # This will be passed to aef.py which calculates the average over this period.
+        date_from = f"{params.start_year}-01-01"
+        date_to = f"{params.end_year}-01-02"
+    else:
+        # this must be replaced with crop calendar
+        date_from = f"{year}-11-01"
+        date_to = f"{year+1}-08-01" # Exclusive end date in EE
     
     # Get the corresponding EE asset for the cropmask
     cropmask_asset = params.cropmask_map.get(str(afi_file))
@@ -175,10 +188,6 @@ def process_gee(val):
 
     validate_scale(scale)
     combo_id = (country, crop, var, year)
-
-    if var == "aef":
-        params.logger.warning('AEF not implemented yet in GEE backend')
-        return combo_id
 
     handler = get_dataset_handler(var)
     if not handler:
@@ -330,7 +339,7 @@ def poll_gee_tasks(params):
             break
             
         # Wait 2 minutes before polling again
-        time.sleep(120)
+        time.sleep(30)
 
 import pandas as pd
 
@@ -348,6 +357,13 @@ def format_gee_csv(path_output, country, region, region_id, year, var):
     df['country'] = country
     df['region'] = region
     df['region_id'] = region_id
+    
+    # AEF does not have year/doy dependency in geomerge, it's a static 64-band embedding.
+    # We just need to ensure the columns exist exactly as-is.
+    if var == 'aef':
+        df.to_csv(path_output, index=False)
+        return
+        
     df['year'] = year
     df[var] = df['stats_mean']
     if 'date' in df.columns:
