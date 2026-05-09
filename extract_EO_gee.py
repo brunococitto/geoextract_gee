@@ -139,10 +139,12 @@ def process_gee_var(
             params.tracked_task_descs.append(config.task_desc)
             return
         elif state in ['COMPLETED', 'SUCCEEDED']:
-            params.logger.info(f"Skipping task {config.task_desc} - already {state}")
-            # Already done, no need to poll, but we will need it for downloading later.
-            # We can track it or assume it's just ready in GCS.
-            return
+            if not getattr(params, 'redo', False):
+                params.logger.info(f"Skipping task {config.task_desc} - already {state}")
+                # Already done, no need to poll, but we will need it for downloading later.
+                return
+            else:
+                params.logger.info(f"Task {config.task_desc} already {state}, but redo is True. Re-submitting...")
 
     # 4. Throttle to respect GEE's 3000 task queue limit
     import time
@@ -231,7 +233,7 @@ def process_gee(val):
             continue
             
         # Hardcoded filter for testing
-        if row[admin_name].lower() not in ['nuristan', 'hirat']:
+        if row[admin_name].lower() not in ['northern']:
             continue
 
         region = row[admin_name].lower().replace(" ", "_")
@@ -240,8 +242,10 @@ def process_gee(val):
         # Check if local CSV already exists (Skip if previously downloaded)
         csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
         path_output = dir_output / csv_name
-        if path_output.exists():
-            params.logger.debug(f"Skipping {region} - {csv_name} already exists locally.")
+        empty_path = dir_output / f"_empty_{csv_name}"
+        
+        if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+            params.logger.debug(f"Skipping {region} - {csv_name} (or empty marker) already exists locally.")
             continue
 
         process_gee_var(
@@ -424,12 +428,12 @@ def download_gee_csvs(params, combinations):
                 
             csv_name = blob.name.split("/")[-1]
             path_output = dir_output / csv_name
+            empty_path = dir_output / f"_empty_{csv_name}"
             
-            if not path_output.exists():
-                params.logger.warning(f'{path_output} already exists')
-                # BUGFIX: We only append the csv_name here because transfer_manager
-                # will automatically prepend the blob_name_prefix to fetch it from GCS!
-                blobs_to_download.append(csv_name)
+            if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+                continue
+                
+            blobs_to_download.append(csv_name)
                 
         # 3. Download concurrently
         if blobs_to_download:
@@ -444,18 +448,29 @@ def download_gee_csvs(params, combinations):
                 max_workers=8,
                 worker_type=transfer_manager.THREAD
             )
-            
-            for name, result in zip(blobs_to_download, results):
+
+            # Check for errors and rename empty files
+            for csv_name, result in zip(blobs_to_download, results):
                 if isinstance(result, Exception):
-                    params.logger.error(f"Failed to download {name}: {result}")
+                    params.logger.error(f"Failed to download {csv_name}: {result}")
                 else:
-                    total_download_count += 1
+                    downloaded_path = dir_output / csv_name
+                    if downloaded_path.exists():
+                        # Check if it has data (more than 1 line)
+                        with open(downloaded_path, 'r') as f:
+                            lines = [next(f, None) for _ in range(2)]
+                            
+                        # If the second line doesn't exist, it's just a header (or completely empty)
+                        if lines[1] is None or not lines[1].strip():
+                            params.logger.warning(f"Downloaded CSV is empty: {csv_name}. Renaming with _empty_ prefix.")
+                            empty_path = dir_output / f"_empty_{csv_name}"
+                            downloaded_path.rename(empty_path)
+                        else:
+                            total_download_count += 1
                     
         # 4. Format the downloaded CSVs to match geomerge expectations
         for _, row in df_country.iterrows():
             if not row[admin_name]:
-                continue
-            if row[admin_name].lower() not in ['nuristan', 'hirat']:
                 continue
                 
             region = row[admin_name].lower().replace(" ", "_")
@@ -479,6 +494,10 @@ def run(obj):
 
     # Initialize Earth Engine once
     common.init_ee(params)
+    
+    params.redo = params.parser.getboolean("DEFAULT", "redo", fallback=False)
+    if params.redo:
+        params.logger.warning("redo is set to True in config. All datasets will be re-processed on Earth Engine, which may result in increased EECU costs.")
     
     params.tracked_task_descs = []
 

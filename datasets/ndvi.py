@@ -49,8 +49,9 @@ def _ndvi_daily_stats_feature(
         "geometry": config.geometry_r,
         "crs": config.reduce_crs,
         "scale": config.reduce_scale,
-        "maxPixels": 1e13,
+        "maxPixels": 1e9,
         "tileScale": 4,
+        "bestEffort": True,
     }
 
     # Common stats: mean, min, max, median, count (valid after mask)
