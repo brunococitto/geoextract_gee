@@ -98,7 +98,7 @@ def process_gee_var(
     export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/{region_id}_{region}_{year}_{var}_{crop}"
 
     # Dates: nov to july for each season
-    # so 2025 will be from nov 2025 to july 2026
+    # so 2026 season (harvested) will be from nov 2025 to july 2026
     # we should read this from crop calendar
     # add a flag and get start/end from calendar at region level
     if var == 'aef':
@@ -108,8 +108,8 @@ def process_gee_var(
         date_to = f"{params.end_year}-01-02"
     else:
         # this must be replaced with crop calendar
-        date_from = f"{year}-11-01"
-        date_to = f"{year+1}-08-01" # Exclusive end date in EE
+        date_from = f"{year-1}-11-01"
+        date_to = f"{year}-08-01" # Exclusive end date in EE
     
     # Get the corresponding EE asset for the cropmask
     cropmask_asset = params.cropmask_map.get(str(afi_file))
@@ -150,7 +150,12 @@ def process_gee_var(
     import time
     if params.active_task_count >= 2900:
         params.logger.info(f"Approaching GEE queue limit ({params.active_task_count} tasks). Pausing submission...")
+        throttle_start = time.time()
         while params.active_task_count >= 2500:
+            if time.time() - throttle_start > 45 * 60:
+                params.logger.error("Throttling timeout (45 minutes) reached! GEE queue is stuck. Aborting submission to prevent infinite hang.")
+                raise TimeoutError("GEE queue failed to drain within 45 minutes.")
+                
             time.sleep(60)
             ops = ee.data.listOperations()
             params.active_task_count = len([
@@ -159,15 +164,28 @@ def process_gee_var(
             ])
         params.logger.info(f"Queue drained to {params.active_task_count}. Resuming submission...")
 
-    # 5. Create and start task
+    # 5. Create and start task with retry logic
+    from tenacity import Retrying, stop_after_attempt, wait_exponential
+    
     try:
-        task = handler.create_task(config, limit)
-        task.start()
-        params.active_task_count += 1
-        params.tracked_task_descs.append(config.task_desc)
-        params.logger.info(f"Submitted GEE task: {task.status()['description']} (ID: {task.id})")
+        for attempt in Retrying(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=5, min=5, max=30),
+            reraise=True
+        ):
+            with attempt:
+                if attempt.retry_state.attempt_number > 1:
+                    params.logger.warning(f"Retrying GEE task submission for {region} (attempt {attempt.retry_state.attempt_number}/3)...")
+                    
+                task = handler.create_task(config, limit)
+                task.start()
+                
+                params.active_task_count += 1
+                params.tracked_task_descs.append(config.task_desc)
+                params.logger.info(f"Submitted GEE task: {task.status()['description']} (ID: {task.id})")
+                
     except Exception as e:
-        params.logger.error(f"Failed to submit GEE task for {region}: {e}")
+        params.logger.error(f"Failed to submit GEE task for {region} after 3 attempts: {e}")
 
 def process_gee(val):
     """
@@ -202,7 +220,7 @@ def process_gee(val):
     threshold = params.parser.getboolean(country, "threshold")
     limit = geo_utils.crop_mask_limit(params, country, threshold)
 
-    params.logger.debug(
+    tqdm.write(
         f"GEE process combo: country={country} crop={crop} scale={scale} var={var} "
         f"year={year} dir_output={dir_output} admin={admin_name}/{admin_id} "
         f"rows={len(df_country)}"
@@ -338,6 +356,7 @@ def poll_gee_tasks(params):
             break
             
         # Optional: Add a timeout to prevent infinite polling (e.g. 24 hours max)
+        # we can set this as a parameter in config
         if (time.time() - start_time) > (24 * 3600):
             params.logger.error("Maximum polling time (24 hours) reached! Aborting poll.")
             break
@@ -347,7 +366,7 @@ def poll_gee_tasks(params):
 
 import pandas as pd
 
-def format_gee_csv(path_output, country, region, region_id, year, var):
+def format_gee_csv(path_output, country, region, region_id, lat, lon, year, var):
     """Formats a raw GEE CSV to match the geomerge structure."""
     if not path_output.exists():
         return
@@ -361,17 +380,25 @@ def format_gee_csv(path_output, country, region, region_id, year, var):
     df['country'] = country
     df['region'] = region
     df['region_id'] = region_id
+    df['lat'] = lat
+    df['lon'] = lon
     
     # AEF does not have year/doy dependency in geomerge, it's a static 64-band embedding.
     # We just need to ensure the columns exist exactly as-is.
     if var == 'aef':
+        # Ensure we maintain the standard column order for the static metadata
+        aef_cols = [col for col in df.columns if col.startswith('aef_')]
+        cols = ['country', 'region', 'region_id', 'lat', 'lon'] + aef_cols
+        df = df[cols]
         df.to_csv(path_output, index=False)
         return
         
-    df['year'] = year
     df[var] = df['stats_mean']
     if 'date' in df.columns:
-        df['doy'] = pd.to_datetime(df['date']).dt.dayofyear
+        date_col = pd.to_datetime(df['date'])
+        # this breaks geomerge logic while adding calendar
+        df['year'] = date_col.dt.year
+        df['doy'] = date_col.dt.dayofyear
 
     # Dynamically rename columns based on the variable
     rename_map = {
@@ -389,7 +416,11 @@ def format_gee_csv(path_output, country, region, region_id, year, var):
     }
     df.rename(columns=rename_map, inplace=True)
     
-    # We keep all other columns (like 'date', 'region_label', etc.)
+    # Ensure correct column ordering while keeping all other columns
+    base_cols = ['country', 'region', 'region_id', 'lat', 'lon', 'year', 'doy', var]
+    other_cols = [col for col in df.columns if col not in base_cols]
+    
+    df = df[base_cols + other_cols]
     df.to_csv(path_output, index=False)
 
 def download_gee_csvs(params, combinations):
@@ -435,24 +466,26 @@ def download_gee_csvs(params, combinations):
                 
             blobs_to_download.append(csv_name)
                 
-        # 3. Download concurrently
+        # 3. Download concurrently with native GCS retries
         if blobs_to_download:
             params.logger.info(f"Downloading {len(blobs_to_download)} new CSVs for {country} {crop} {var}...")
             
-            # blob_name_prefix strips the GCS path so files go straight into dir_output
+            from google.cloud.storage.retry import DEFAULT_RETRY
+            
             results = transfer_manager.download_many_to_path(
                 bucket,
                 blobs_to_download,
                 destination_directory=str(dir_output),
                 blob_name_prefix=prefix,
                 max_workers=8,
-                worker_type=transfer_manager.THREAD
+                worker_type=transfer_manager.THREAD,
+                download_kwargs={"retry": DEFAULT_RETRY}
             )
 
             # Check for errors and rename empty files
             for csv_name, result in zip(blobs_to_download, results):
                 if isinstance(result, Exception):
-                    params.logger.error(f"Failed to download {csv_name}: {result}")
+                    params.logger.error(f"Failed to download {csv_name} after built-in retries: {result}")
                 else:
                     downloaded_path = dir_output / csv_name
                     if downloaded_path.exists():
@@ -475,11 +508,15 @@ def download_gee_csvs(params, combinations):
                 
             region = row[admin_name].lower().replace(" ", "_")
             region_id = row[admin_id]
+            centroid = row.geometry.centroid
+            lat = round(centroid.y, 6)
+            lon = round(centroid.x, 6)
+            
             csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
             path_output = dir_output / csv_name
             
             try:
-                format_gee_csv(path_output, country, region, region_id, year, var)
+                format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
             except Exception as e:
                 params.logger.error(f"Failed to format CSV {path_output}: {e}")
                     
