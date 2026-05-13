@@ -13,6 +13,7 @@ def _ndvi_daily_stats_feature(
 ) -> ee.Feature:
     """
     One row per day, aligned with geoextract geom_extract + arr_stats for NDVI.
+    Uses strict QA for high-quality daily observations.
     """
     img = ee.Image(img)
 
@@ -31,7 +32,6 @@ def _ndvi_daily_stats_feature(
     ])
     
     # geomerge.py explicitly reverses "Mark's Scaling" ((NDVI * 200) + 50) on the local side.
-    # We must apply it here and cast to int16 to reduce CSV file sizes!
     ndvi = ndvi_raw.multiply(200).add(50).int16().rename("ndvi")
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
