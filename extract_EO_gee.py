@@ -255,8 +255,8 @@ def process_gee(val):
         if row[admin_name].lower() not in ['northern']:
             continue
 
-        region = row[admin_name].lower().replace(" ", "_")
-        region_id = row[admin_id]
+        region = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+        region_id = str(row[admin_id])
 
         # Check if local CSV already exists (Skip if previously downloaded)
         csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
@@ -448,19 +448,32 @@ def download_gee_csvs(params, combinations):
         # The GCS prefix for this combination
         prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/"
         
-        # 1. Fetch all existing blobs in this prefix
+        # 1. Generate the whitelist of expected CSV names based on the current regions
+        expected_csv_names = set()
+        for _, row in df_country.iterrows():
+            region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+            region_id = str(row[admin_id])
+            csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
+            expected_csv_names.add(csv_name)
+            
+        # 2. Fetch all existing blobs in this prefix and filter by whitelist
         blobs = list(bucket.list_blobs(prefix=prefix))
         
-        # 2. Filter out blobs that already exist locally
         blobs_to_download = []
         for blob in blobs:
             if not blob.name.endswith(".csv"):
                 continue
                 
             csv_name = blob.name.split("/")[-1]
+            
+            # Skip files that are not part of our current region configuration
+            if csv_name not in expected_csv_names:
+                continue
+                
             path_output = dir_output / csv_name
             empty_path = dir_output / f"_empty_{csv_name}"
             
+            # 3. Filter out blobs that already exist locally (if not redoing)
             if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
                 continue
                 
@@ -506,8 +519,8 @@ def download_gee_csvs(params, combinations):
             if not row[admin_name]:
                 continue
                 
-            region = row[admin_name].lower().replace(" ", "_")
-            region_id = row[admin_id]
+            region = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+            region_id = str(row[admin_id])
             centroid = row.geometry.centroid
             lat = round(centroid.y, 6)
             lon = round(centroid.x, 6)
