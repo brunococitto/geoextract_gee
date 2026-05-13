@@ -104,12 +104,13 @@ def process_gee_var(
     if var == 'aef':
         # AEF gets passed year=0 from extract_EO, so we must use the global config years.
         # This will be passed to aef.py which calculates the average over this period.
-        date_from = f"{params.start_year}-01-01"
-        date_to = f"{params.end_year}-01-02"
+        date_from = f"2017-01-01"
+        # Use current year to ensure we capture the latest AEF range
+        current_year = ar.now().year
+        date_to = f"{current_year}-01-01"
     else:
-        # this must be replaced with crop calendar
-        date_from = f"{year-1}-11-01"
-        date_to = f"{year}-08-01" # Exclusive end date in EE
+        date_from = f"{year}-01-01"
+        date_to = f"{year+1}-01-01" # Exclusive end date in EE
     
     # Get the corresponding EE asset for the cropmask
     cropmask_asset = params.cropmask_map.get(str(afi_file))
@@ -393,11 +394,10 @@ def format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
         df.to_csv(path_output, index=False)
         return
         
+    df['year'] = year
     df[var] = df['stats_mean']
     if 'date' in df.columns:
         date_col = pd.to_datetime(df['date'])
-        # this breaks geomerge logic while adding calendar
-        df['year'] = date_col.dt.year
         df['doy'] = date_col.dt.dayofyear
 
     # Dynamically rename columns based on the variable
@@ -522,7 +522,6 @@ def download_gee_csvs(params, combinations):
                     
     params.logger.info(f"Successfully downloaded and formatted {total_download_count} new CSVs from GCS.")
     params.logger.info("GeoExtract GEE Pipeline Complete!")
-
 
 def run(obj):
     """Main entry for the GEE extraction pipeline."""
