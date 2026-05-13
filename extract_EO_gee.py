@@ -136,16 +136,16 @@ def process_gee_var(
     if config.task_desc in existing_tasks:
         state = existing_tasks[config.task_desc]
         if state in ['RUNNING', 'READY', 'PENDING']:
-            params.logger.info(f"Skipping task {config.task_desc} - already {state}")
+            tqdm.write(f"INFO: Skipping task {config.task_desc} - already {state}")
             params.tracked_task_descs.append(config.task_desc)
             return
         elif state in ['COMPLETED', 'SUCCEEDED']:
             if not getattr(params, 'redo', False):
-                params.logger.info(f"Skipping task {config.task_desc} - already {state}")
+                tqdm.write(f"INFO: Skipping task {config.task_desc} - already {state}")
                 # Already done, no need to poll, but we will need it for downloading later.
                 return
             else:
-                params.logger.info(f"Task {config.task_desc} already {state}, but redo is True. Re-submitting...")
+                tqdm.write(f"INFO: Task {config.task_desc} already {state}, but redo is True. Re-submitting...")
 
     # 4. Throttle to respect GEE's 3000 task queue limit
     import time
@@ -183,7 +183,7 @@ def process_gee_var(
                 
                 params.active_task_count += 1
                 params.tracked_task_descs.append(config.task_desc)
-                params.logger.info(f"Submitted GEE task: {task.status()['description']} (ID: {task.id})")
+                tqdm.write(f"INFO: Submitted GEE task: {task.status()['description']} (ID: {task.id})")
                 
     except Exception as e:
         params.logger.error(f"Failed to submit GEE task for {region} after 3 attempts: {e}")
