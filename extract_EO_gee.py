@@ -75,6 +75,7 @@ def process_gee_var(
     handler,
     crs,
     existing_tasks: dict,
+    max_date: str|None = None,
 ):
     """
     Submits a GEE export task for a single region.
@@ -96,20 +97,21 @@ def process_gee_var(
     
     project_name = params.project_name
     export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/{region_id}_{region}_{year}_{var}_{crop}"
-
-    # Dates: nov to july for each season
-    # so 2026 season (harvested) will be from nov 2025 to july 2026
-    # we should read this from crop calendar
-    # add a flag and get start/end from calendar at region level
+    
     if var == 'aef':
         # AEF gets passed year=0 from extract_EO, so we must use the global config years.
         # This will be passed to aef.py which calculates the average over this period.
         date_from = f"2017-01-01"
         # Use current year to ensure we capture the latest AEF range
         current_year = ar.now().year
-        date_to = f"{current_year}-01-01"
+        date_to = f"{current_year}-01-02"
     else:
-        date_from = f"{year}-01-01"
+        if max_date:
+            date_from = max_date
+            suffix = max_date.replace("-", "")[4:]
+            export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/{region_id}_{region}_{year}_{var}_{crop}_u{suffix}"
+        else:
+            date_from = f"{year}-01-01"
         date_to = f"{year+1}-01-01" # Exclusive end date in EE
     
     # Get the corresponding EE asset for the cropmask
@@ -247,6 +249,7 @@ def process_gee(val):
             if state in ['PENDING', 'RUNNING', 'READY']:
                 params.active_task_count += 1
 
+    current_year = ar.now().year
     for _, row in df_country.iterrows():
         if not row[admin_name]:
             continue
@@ -263,9 +266,25 @@ def process_gee(val):
         path_output = dir_output / csv_name
         empty_path = dir_output / f"_empty_{csv_name}"
         
+        max_date = None
         if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
-            params.logger.debug(f"Skipping {region} - {csv_name} (or empty marker) already exists locally.")
-            continue
+            if year == current_year and path_output.exists() and var != 'aef':
+                try:
+                    import pandas as pd
+                    df_existing = pd.read_csv(path_output)
+                    if 'date' in df_existing.columns:
+                        max_date = pd.to_datetime(df_existing['date']).max().strftime('%Y-%m-%d')
+                except Exception as e:
+                    params.logger.warning(f"Failed to read current year ({year}) existing CSV to find max date: {e}")
+                    
+                if max_date:
+                    params.logger.debug(f"Found existing current year CSV for {region}. Will extract from {max_date} onwards.")
+                else:
+                    params.logger.debug(f"Skipping {region} - {csv_name} (or empty marker) already exists locally.")
+                    continue
+            else:
+                params.logger.debug(f"Skipping {region} - {csv_name} (or empty marker) already exists locally.")
+                continue
 
         process_gee_var(
             row,
@@ -282,6 +301,7 @@ def process_gee(val):
             handler,
             df_country.crs,
             existing_tasks,
+            max_date,
         )
 
 
@@ -448,13 +468,12 @@ def download_gee_csvs(params, combinations):
         # The GCS prefix for this combination
         prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/"
         
-        # 1. Generate the whitelist of expected CSV names based on the current regions
-        expected_csv_names = set()
+        # 1. Generate the whitelist of expected CSV prefixes based on the current regions
+        expected_prefixes = set()
         for _, row in df_country.iterrows():
             region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
             region_id = str(row[admin_id])
-            csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
-            expected_csv_names.add(csv_name)
+            expected_prefixes.add(f"{region_id}_{region_label}_{year}_{var}_{crop}")
             
         # 2. Fetch all existing blobs in this prefix and filter by whitelist
         blobs = list(bucket.list_blobs(prefix=prefix))
@@ -466,16 +485,31 @@ def download_gee_csvs(params, combinations):
                 
             csv_name = blob.name.split("/")[-1]
             
-            # Skip files that are not part of our current region configuration
-            if csv_name not in expected_csv_names:
+            # Check if this blob matches any of our expected prefixes
+            matched_prefix = None
+            for exp_prefix in expected_prefixes:
+                if csv_name.startswith(exp_prefix):
+                    matched_prefix = exp_prefix
+                    break
+                    
+            if not matched_prefix:
                 continue
-                
-            path_output = dir_output / csv_name
-            empty_path = dir_output / f"_empty_{csv_name}"
+
+            import re
             
-            # 3. Filter out blobs that already exist locally (if not redoing)
-            if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
-                continue
+            is_update = re.search(r'_u\d{4}\.csv$', csv_name)
+            base_csv_name = f"{matched_prefix}.csv"
+            path_output = dir_output / base_csv_name
+            empty_path = dir_output / f"_empty_{base_csv_name}"
+            download_dest = dir_output / csv_name
+            
+            # 3. Filter out blobs that already exist locally
+            if not is_update:
+                if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+                    continue
+            else:
+                if download_dest.exists():
+                    continue
                 
             blobs_to_download.append(csv_name)
                 
@@ -528,10 +562,37 @@ def download_gee_csvs(params, combinations):
             csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
             path_output = dir_output / csv_name
             
-            try:
-                format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
-            except Exception as e:
-                params.logger.error(f"Failed to format CSV {path_output}: {e}")
+            # Format base file first if it exists
+            if path_output.exists():
+                try:
+                    format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
+                except Exception as e:
+                    params.logger.error(f"Failed to format base CSV {path_output}: {e}")
+                    
+            # Process and merge update files
+            update_files = sorted([f for f in dir_output.glob(f"{region_id}_{region}_{year}_{var}_{crop}_u*.csv")])
+            if update_files and path_output.exists():
+                import pandas as pd
+                try:
+                    base_df = pd.read_csv(path_output)
+                    dfs = [base_df]
+                    for uf in update_files:
+                        # Format the update file first to match base columns
+                        format_gee_csv(uf, country, region, region_id, lat, lon, year, var)
+                        udf = pd.read_csv(uf)
+                        if not udf.empty:
+                            dfs.append(udf)
+                            
+                    merged_df = pd.concat(dfs, ignore_index=True)
+                    if 'date' in merged_df.columns:
+                        merged_df = merged_df.drop_duplicates(subset=['date'], keep='last')
+                        merged_df = merged_df.sort_values(by='date')
+                        
+                    merged_df.to_csv(path_output, index=False)
+                    for uf in update_files:
+                        uf.unlink()
+                except Exception as e:
+                    params.logger.error(f"Failed to merge update files for {path_output}: {e}")
                     
     params.logger.info(f"Successfully downloaded and formatted {total_download_count} new CSVs from GCS.")
     params.logger.info("GeoExtract GEE Pipeline Complete!")

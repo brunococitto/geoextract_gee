@@ -17,11 +17,24 @@ def _ndvi_daily_stats_feature(
     """
     img = ee.Image(img)
 
-    # 1. QA Masking
-    # State_QA bit 0-1: 00=clear, 01=cloudy, 10=mixed, 11=not set
-    qa = img.select("Coarse_Resolution_State_QA")
-    cloud_state = qa.bitwiseAnd(3)
-    img = img.updateMask(cloud_state.eq(0))
+    # 1. QA Masking similar to octvi ranking logic
+    state_qa = img.select("Coarse_Resolution_State_QA")
+    
+    # Snow (Bits 12 or 15)
+    snow = state_qa.bitwiseAnd(4096).gt(0).Or(state_qa.bitwiseAnd(32768).gt(0))
+    
+    # High Aerosol (Bits 6 and 7 == 11) -> 192 in decimal
+    high_aerosol = state_qa.bitwiseAnd(192).eq(192)
+    
+    # Cloud Shadow (Bit 2)
+    shadow = state_qa.bitwiseAnd(4).gt(0)
+    
+    # Internal Cloud Algorithm (Bit 10)
+    cloud_int = state_qa.bitwiseAnd(1024).gt(0)
+    
+    # Combine masks: keep pixels where NONE of these bad conditions are true
+    bad_pixels = snow.Or(high_aerosol).Or(shadow).Or(cloud_int)
+    img = img.updateMask(bad_pixels.Not())
 
     # 2. Calculate NDVI
     # Band 1 (Red), Band 2 (NIR)
@@ -61,6 +74,13 @@ def _ndvi_daily_stats_feature(
         **reducer_common_parms
     )
     
+    # Calculate total valid pixels in the mask
+    d_total_mask = w.rename("weight").reduceRegion(
+        reducer=ee.Reducer.count().unweighted(),
+        **reducer_common_parms
+    )
+    total_mask_pixels = ee.Number(d_total_mask.get("weight"))
+    
     # Combined min, max, median, and unweighted count
     d_stats = pf.reduceRegion(
         reducer=ee.Reducer.minMax()
@@ -69,8 +89,9 @@ def _ndvi_daily_stats_feature(
         **reducer_common_parms
     )
 
-    valid_after = d_stats.getNumber("ndvi_count")
-    mean_raw = d_mean.getNumber("mean")
+    valid_after = ee.Number(d_stats.get("ndvi_count"))
+    
+    mean_raw = d_mean.get("mean")
     
     props = {
         "date": img.date().format("YYYY-MM-dd"),
@@ -80,8 +101,12 @@ def _ndvi_daily_stats_feature(
         "stats_max": d_stats.get("ndvi_max"),
         "stats_median": d_stats.get("ndvi_median"),
         "stats_count": valid_after,
+        "total_mask_pixels": total_mask_pixels,
     }
-
+    
+    feat = ee.Feature(None, ee.Dictionary(props))
+    
+    # Add audit properties if requested
     if config.include_audit:
         stack_audit = ee.Image.cat([
             ee.Image.constant(1).clip(config.geometry_r).rename("total_w"),
@@ -100,10 +125,11 @@ def _ndvi_daily_stats_feature(
         sum_p2w = d_audit.getNumber("p2w")
         
         # Weighted Std Dev logic
+        mean_num = ee.Number(mean_raw)
         var_raw = ee.Number(
             ee.Algorithms.If(
                 w_used_sum.gt(0),
-                sum_p2w.divide(w_used_sum).subtract(mean_raw.pow(2)),
+                sum_p2w.divide(w_used_sum).subtract(mean_num.pow(2)),
                 0,
             )
         )
@@ -115,7 +141,7 @@ def _ndvi_daily_stats_feature(
             )
         )
 
-        props.update({
+        feat = feat.set({
             "counts_total": d_audit.getNumber("total_w"),
             "counts_valid_data": d_audit.getNumber("valid_p_w"),
             "counts_valid_data_after_masking": valid_after,
@@ -150,7 +176,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
 
     col = ic.map(lambda im: _ndvi_daily_stats_feature(im, config, mask_threshold_percent))
 
-    selectors = ["date", "region_label", "stats_mean", "stats_min", "stats_max", "stats_median", "stats_count"]
+    selectors = ["date", "region_label", "stats_mean", "stats_min", "stats_max", "stats_median", "stats_count", "total_mask_pixels"]
     if config.include_audit:
         selectors += [
             "counts_total", "counts_valid_data", "counts_valid_data_after_masking",

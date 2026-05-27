@@ -13,10 +13,21 @@ def init_ee(params) -> None:
     # Initialize Earth Engine using settings from config or defaults.
     
     # Path relative to metadata folder as specified in config
-    gee_key = params.parser.get("DEFAULT", "gee_key")
-    secret_path = params.dir_metadata / gee_key
-    
+    gee_key = params.parser.get("DEFAULT", "gee_key", fallback="")
     project_id = params.parser.get("DEFAULT", "gee_project")
+
+    if not gee_key or gee_key.lower() == "none":
+        # Fallback to ee.Authenticate for users without a service account
+        params.logger.info("No gee_key provided in config. Falling back to default ee.Authenticate()...")
+        try:
+            ee.Initialize(project=project_id)
+        except Exception:
+            ee.Authenticate()
+            ee.Initialize(project=project_id)
+        params.logger.info(f"Earth Engine initialized with default credentials for project: {project_id}")
+        return
+
+    secret_path = params.dir_metadata / gee_key
 
     if not secret_path.is_file():
         raise RuntimeError(f"GEE secret key not found at {secret_path}")
@@ -66,7 +77,11 @@ class TaskConfig:
         self.include_audit = include_audit
         
         self.prj_name = self.export_prefix.split('/')[1] if self.export_prefix.startswith('gee_extract/') else 'unknown'
-        self.task_desc = f"{self.prj_name}_{self.country}_{self.var}_{self.year}_{self.region_label}_{self.crop}"
+        
+        # Extract _uMMDD suffix if exists
+        suffix = self.export_prefix[-6:] if self.export_prefix[-6:-4] == '_u' and self.export_prefix[-4:].isdigit() else ""
+            
+        self.task_desc = f"{self.prj_name}_{self.country}_{self.var}_{self.year}_{self.region_label}_{self.crop}{suffix}"
 
         # Internal placeholders for projection-aware reduction
         self.geometry_r = None
