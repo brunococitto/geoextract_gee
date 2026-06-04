@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geoextract-gee"
+version = "0.1.0"
+description = "Google Earth Engine backend for geoprepare (geoextract)"
+requires-python = ">=3.9"
+dependencies = [
+    "geoprepare",
+    "earthengine-api",
+    "cdsapi"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+# Map import package name to this directory (flat layout).
+[tool.setuptools]
+package-dir = {"geoextract_gee" = "."}
+packages = ["geoextract_gee"]
