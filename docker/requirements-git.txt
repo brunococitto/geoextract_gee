@@ -1,0 +1,3 @@
+git+https://github.com/ritviksahajpal/octvi.git
+git+https://github.com/ritviksahajpal/pygeoutil.git
+git+https://github.com/brunococitto/geoextract_gee.git
