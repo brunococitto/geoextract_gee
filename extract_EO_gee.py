@@ -184,6 +184,7 @@ def process_gee_var(
                 task.start()
                 
                 params.active_task_count += 1
+                existing_tasks[config.task_desc] = 'PENDING'
                 params.tracked_task_descs.append(config.task_desc)
                 tqdm.write(f"INFO: Submitted GEE task: {task.status()['description']} (ID: {task.id})")
                 
@@ -230,26 +231,8 @@ def process_gee(val):
     )
 
     # Fetch existing tasks to skip duplicates
-    # This queries GEE for recent tasks (usually limited to the last few days/weeks)
-    # to avoid starting a new task if one is already processing or completed.
-    import ee
-    existing_tasks = {}
-    
-    if not hasattr(params, 'active_task_count'):
-        params.active_task_count = 0
-        
-    for op in ee.data.listOperations():
-        metadata = op.get('metadata', {})
-        desc = metadata.get('description')
-        state = metadata.get('state')
-        # Keep only the newest state. If the newest run FAILED, we must record it as FAILED 
-        # so we don't accidentally fall back to tracking an older COMPLETED run!
-        if desc and desc not in existing_tasks:
-            existing_tasks[desc] = state
-            if state in ['PENDING', 'RUNNING', 'READY']:
-                params.active_task_count += 1
-
-    current_year = ar.now().year
+    # We now fetch this once in run() to avoid an expensive network call per combination
+    existing_tasks = getattr(params, 'existing_tasks', {})
     for _, row in df_country.iterrows():
         if not row[admin_name]:
             continue
@@ -621,6 +604,20 @@ def run(obj):
     
     # Store the map in params for easy access in handlers
     params.cropmask_map = cropmask_map
+
+    # Fetch existing tasks once to avoid network overhead per combination
+    params.existing_tasks = {}
+    params.active_task_count = 0
+    for op in ee.data.listOperations():
+        metadata = op.get('metadata', {})
+        desc = metadata.get('description')
+        state = metadata.get('state')
+        # Keep only the newest state. If the newest run FAILED, we must record it as FAILED 
+        # so we don't accidentally fall back to tracking an older COMPLETED run
+        if desc and desc not in params.existing_tasks:
+            params.existing_tasks[desc] = state
+            if state in ['PENDING', 'RUNNING', 'READY']:
+                params.active_task_count += 1
 
     for combo in tqdm(combinations, desc="GeoExtract GEE", unit="combo"):
         process_gee(combo)
