@@ -435,139 +435,143 @@ def download_gee_csvs(params, combinations):
     params.logger.info("Downloading completed GEE CSVs from Google Cloud Storage concurrently...")
     from google.cloud import storage
     from google.cloud.storage import transfer_manager
+    from google.cloud.storage.retry import DEFAULT_RETRY
+    import collections
+    import re
+    from pathlib import Path
     
     bucket_name = params.parser.get("DEFAULT", "gee_bucket")
     client = storage.Client()
     bucket = client.bucket(bucket_name)
+    project_name = params.project_name
     
+    # 1. Find all unique country/scale pairs
+    country_scale_pairs = set()
+    for combo in combinations:
+        _, country, _, scale, _, _, _, _ = combo
+        country_scale_pairs.add((country, scale))
+        
     total_download_count = 0
     
-    for combo in combinations:
-        params_obj, country, crop, scale, var, year, afi_file, df_country = combo
+    # Process each country/scale super-group
+    for country, scale in country_scale_pairs:
+        prefix = f"gee_extract/{project_name}/{country}/{scale}/"
+        params.logger.info(f"Fetching blob list for {country}/{scale} from GCS...")
         
-        dir_output = prepare_output_directory_gee(params, country, scale, crop, var)
-        params.logger.info(dir_output)
-        admin_name, admin_id = get_admin_fields(scale)
-        project_name = params.project_name
+        # 2. Make one API call per country to get all blobs
+        all_blobs = list(bucket.list_blobs(prefix=prefix))
         
-        # The GCS prefix for this combination
-        prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/"
-        
-        # 1. Generate the whitelist of expected CSV prefixes based on the current regions
-        expected_prefixes = set()
-        for _, row in df_country.iterrows():
-            region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
-            region_id = str(row[admin_id])
-            expected_prefixes.add(f"{region_id}_{region_label}_{year}_{var}_{crop}")
+        # 3. Group blobs by base CSV name for lookup
+        blob_groups = collections.defaultdict(list)
+        for b in all_blobs:
+            if not b.name.endswith(".csv"):
+                continue
+            fname = b.name.split("/")[-1]
+            base_name = re.sub(r'_u\d{4}\.csv$', '', fname)
+            if base_name.endswith('.csv'):
+                base_name = base_name[:-4]
+            blob_groups[base_name].append(b)
             
-        # 2. Fetch all existing blobs in this prefix and filter by whitelist
-        blobs = list(bucket.list_blobs(prefix=prefix))
-        
-        blobs_to_download = []
-        for blob in blobs:
-            if not blob.name.endswith(".csv"):
+        blobs_to_download = [] # List of tuples: (blob_object, str(local_path), csv_name)
+        format_queue = [] # List of combos to format later
+        # 4. Match combinations to blobs
+        for combo in combinations:
+            params_obj, c_country, crop, c_scale, var, year, afi_file, df_country = combo
+            if c_country != country or c_scale != scale:
                 continue
                 
-            csv_name = blob.name.split("/")[-1]
-            
-            # Check if this blob matches any of our expected prefixes
-            matched_prefix = None
-            for exp_prefix in expected_prefixes:
-                if csv_name.startswith(exp_prefix):
-                    matched_prefix = exp_prefix
-                    break
+            dir_output = prepare_output_directory_gee(params, country, scale, crop, var)
+            admin_name, admin_id = get_admin_fields(scale)
+            for _, row in df_country.iterrows():
+                if not row[admin_name]:
+                    continue
+                region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                region_id = str(row[admin_id])
+                
+                base_csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}"
+                matching_blobs = blob_groups.get(base_csv_name, [])
+                
+                base_csv_filename = f"{base_csv_name}.csv"
+                path_output = dir_output / base_csv_filename
+                empty_path = dir_output / f"_empty_{base_csv_filename}"
+                
+                update_files_to_merge = []
+                
+                for blob in matching_blobs:
+                    csv_name = blob.name.split("/")[-1]
+                    is_update = bool(re.search(r'_u\d{4}\.csv$', csv_name))
+                    download_dest = dir_output / csv_name
                     
-            if not matched_prefix:
-                continue
-
-            import re
-            
-            is_update = re.search(r'_u\d{4}\.csv$', csv_name)
-            base_csv_name = f"{matched_prefix}.csv"
-            path_output = dir_output / base_csv_name
-            empty_path = dir_output / f"_empty_{base_csv_name}"
-            download_dest = dir_output / csv_name
-            
-            # 3. Filter out blobs that already exist locally
-            if not is_update:
-                if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
-                    continue
-            else:
-                if download_dest.exists():
-                    continue
-                
-            blobs_to_download.append(csv_name)
-                
-        # 3. Download concurrently with native GCS retries
+                    if not is_update:
+                        if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+                            continue
+                    else:
+                        if download_dest.exists():
+                            update_files_to_merge.append(download_dest)
+                            continue
+                            
+                    blobs_to_download.append((blob, str(download_dest), csv_name))
+                    
+                    if is_update:
+                        update_files_to_merge.append(download_dest)
+                        
+                format_queue.append((path_output, country, region_label, region_id, 
+                                        round(row.geometry.centroid.y, 6), 
+                                        round(row.geometry.centroid.x, 6), 
+                                        year, var, update_files_to_merge))
+                                    
+        # 5. Concurrently download everything using transfer_manager.download_many
         if blobs_to_download:
-            params.logger.info(f"Downloading {len(blobs_to_download)} new CSVs for {country} {crop} {var}...")
+            params.logger.info(f"Downloading {len(blobs_to_download)} CSVs concurrently for {country} {scale}...")
             
-            from google.cloud.storage.retry import DEFAULT_RETRY
+            # create pairs of (blob, file_path_string)
+            blob_file_pairs = [(b_obj, dest) for b_obj, dest, _ in blobs_to_download]
             
-            results = transfer_manager.download_many_to_path(
-                bucket,
-                blobs_to_download,
-                destination_directory=str(dir_output),
-                blob_name_prefix=prefix,
-                max_workers=8,
+            results = transfer_manager.download_many(
+                blob_file_pairs,
+                max_workers=16,
                 worker_type=transfer_manager.THREAD,
                 download_kwargs={"retry": DEFAULT_RETRY}
             )
-
-            # Check for errors and rename empty files
-            for csv_name, result in zip(blobs_to_download, results):
+            
+            # Process results
+            for (b_obj, dest, csv_name), result in zip(blobs_to_download, results):
                 if isinstance(result, Exception):
-                    params.logger.error(f"Failed to download {csv_name} after built-in retries: {result}")
+                    params.logger.error(f"Failed to download {csv_name}: {result}")
                 else:
-                    downloaded_path = dir_output / csv_name
-                    if downloaded_path.exists():
-                        # Check if it has data (more than 1 line)
-                        with open(downloaded_path, 'r') as f:
+                    dest_path = Path(dest)
+                    if dest_path.exists():
+                        with open(dest_path, 'r') as f:
                             lines = [next(f, None) for _ in range(2)]
-                            
-                        # If the second line doesn't exist, it's just a header (or completely empty)
                         if lines[1] is None or not lines[1].strip():
                             params.logger.warning(f"Downloaded CSV is empty: {csv_name}. Renaming with _empty_ prefix.")
-                            empty_path = dir_output / f"_empty_{csv_name}"
-                            downloaded_path.rename(empty_path)
+                            empty_path = dest_path.parent / f"_empty_{csv_name}"
+                            dest_path.rename(empty_path)
                         else:
                             total_download_count += 1
-                    
-        # 4. Format the downloaded CSVs to match geomerge expectations
-        for _, row in df_country.iterrows():
-            if not row[admin_name]:
-                continue
-                
-            region = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
-            region_id = str(row[admin_id])
-            centroid = row.geometry.centroid
-            lat = round(centroid.y, 6)
-            lon = round(centroid.x, 6)
+        # 6. Format and merge updates locally
+        for fq in format_queue:
+            path_output, f_country, region, region_id, lat, lon, f_year, f_var, update_files = fq
             
-            csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
-            path_output = dir_output / csv_name
-            
-            # Format base file first if it exists
             if path_output.exists():
                 try:
-                    format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
+                    format_gee_csv(path_output, f_country, region, region_id, lat, lon, f_year, f_var)
                 except Exception as e:
                     params.logger.error(f"Failed to format base CSV {path_output}: {e}")
                     
-            # Process and merge update files
-            update_files = sorted([f for f in dir_output.glob(f"{region_id}_{region}_{year}_{var}_{crop}_u*.csv")])
             if update_files and path_output.exists():
                 import pandas as pd
                 try:
                     base_df = pd.read_csv(path_output)
                     dfs = [base_df]
                     for uf in update_files:
-                        # Format the update file first to match base columns
-                        format_gee_csv(uf, country, region, region_id, lat, lon, year, var)
-                        udf = pd.read_csv(uf)
-                        if not udf.empty:
-                            dfs.append(udf)
-                            
+                        uf_path = Path(uf)
+                        if uf_path.exists():
+                            format_gee_csv(uf_path, f_country, region, region_id, lat, lon, f_year, f_var)
+                            udf = pd.read_csv(uf_path)
+                            if not udf.empty:
+                                dfs.append(udf)
+                                
                     merged_df = pd.concat(dfs, ignore_index=True)
                     if 'date' in merged_df.columns:
                         merged_df = merged_df.drop_duplicates(subset=['date'], keep='last')
@@ -575,10 +579,12 @@ def download_gee_csvs(params, combinations):
                         
                     merged_df.to_csv(path_output, index=False)
                     for uf in update_files:
-                        uf.unlink()
+                        uf_path = Path(uf)
+                        if uf_path.exists():
+                            uf_path.unlink()
                 except Exception as e:
                     params.logger.error(f"Failed to merge update files for {path_output}: {e}")
-                    
+
     params.logger.info(f"Successfully downloaded and formatted {total_download_count} new CSVs from GCS.")
     params.logger.info("GeoExtract GEE Pipeline Complete!")
 
