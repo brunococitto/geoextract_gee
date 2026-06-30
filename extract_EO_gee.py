@@ -5,6 +5,7 @@ Mirrors the role of ``geoprepare.extract.extract_EO`` for the geoextract_gee ext
 ``run`` orchestrates combinations; ``process_gee`` handles one combo.
 """
 
+from pandas.io import feather_format
 from __future__ import annotations
 
 import os
@@ -15,6 +16,7 @@ from tqdm import tqdm
 import arrow as ar
 import geopandas as gpd
 import ee
+from shapely.geometry import mapping
 
 from geoprepare import utils as geo_utils
 from geoprepare.extract.extract_EO import (
@@ -76,20 +78,21 @@ def process_gee_var(
     crs,
     existing_tasks: dict,
     max_date: str|None = None,
+    bulk_fc: ee.FeatureCollection|None = None,
 ):
     """
-    Submits a GEE export task for a single region.
+    Submits a GEE export task for a single region (or bulk regions).
     """
     # 1. Convert shapely geometry to EE geometry (WGS84)
-    from shapely.geometry import mapping
-    import geopandas as gpd
-    
-    if crs is None:
-        params.logger.warning(f"Shapefile CRS is missing. Assuming EPSG:4326 for region {region}.")
-        crs = "EPSG:4326"
+    if bulk_fc is not None:
+        geom_ee = bulk_fc
+    else:
+        if crs is None:
+            params.logger.warning(f"Shapefile CRS is missing. Assuming EPSG:4326 for region {region}.")
+            crs = "EPSG:4326"
 
-    geom_wgs84 = gpd.GeoSeries([row.geometry], crs=crs).to_crs("EPSG:4326").iloc[0]
-    geom_ee = common.ee.Geometry(mapping(geom_wgs84))
+        geom_wgs84 = gpd.GeoSeries([row.geometry], crs=crs).to_crs("EPSG:4326").iloc[0]
+        geom_ee = common.ee.Geometry(mapping(geom_wgs84))
 
     # 2. Read GEE settings from config
     export_bucket = params.parser.get("DEFAULT", "gee_bucket")
@@ -233,6 +236,68 @@ def process_gee(val):
     # Fetch existing tasks to skip duplicates
     # We now fetch this once in run() to avoid an expensive network call per combination
     existing_tasks = getattr(params, 'existing_tasks', {})
+    gee_parallel_regions = params.parser.getboolean("DEFAULT", "gee_parallel_regions", fallback=False)
+
+    current_year = ar.now().year
+    
+    if gee_parallel_regions:
+        features = []
+        for _, row in df_country.iterrows():
+            if not row[admin_name]:
+                continue
+            region = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+            region_id = str(row[admin_id])
+            
+            csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
+            path_output = dir_output / csv_name
+            empty_path = dir_output / f"_empty_{csv_name}"
+            
+            # Check if this specific region already exists locally
+            if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+                # If we're updating current year, we don't support parallel updates yet, 
+                # so we just re-run the whole year for all regions, or we could fallback to sequential.
+                # For simplicity, we assume bulk processing extracts the full year.
+                # Skip adding this feature if it's fully downloaded and we aren't updating it
+                if year == current_year and var != 'aef' and path_output.exists():
+                    pass # We will re-extract current year entirely for this region to get updates
+                else:
+                    continue
+                    
+            crs = df_country.crs if df_country.crs else "EPSG:4326"
+            geom_wgs84 = gpd.GeoSeries([row.geometry], crs=crs).to_crs("EPSG:4326").iloc[0]
+            
+            feat = ee.Feature(ee.Geometry(mapping(geom_wgs84)), {
+                "region_label": region,
+                "region_id": region_id
+            })
+            features.append(feat)
+            
+        if not features:
+            params.logger.debug(f"All regions skipped for {country} {var} {year} {crop}")
+            return combo_id
+            
+        fc = ee.FeatureCollection(features)
+        
+        process_gee_var(
+            row=None,
+            limit=limit,
+            var=var,
+            params=params,
+            year=year,
+            country=country,
+            region="all_regions",
+            region_id="bulk",
+            crop=crop,
+            scale=scale,
+            afi_file=_afi_file,
+            handler=handler,
+            crs="EPSG:4326",
+            existing_tasks=existing_tasks,
+            max_date=None,
+            bulk_fc=fc
+        )
+        return combo_id
+
     for _, row in df_country.iterrows():
         if not row[admin_name]:
             continue
@@ -474,6 +539,8 @@ def download_gee_csvs(params, combinations):
             
         blobs_to_download = [] # List of tuples: (blob_object, str(local_path), csv_name)
         format_queue = [] # List of combos to format later
+        split_queue = [] # List of bulk CSVs to split
+        
         # 4. Match combinations to blobs
         for combo in combinations:
             params_obj, c_country, crop, c_scale, var, year, afi_file, df_country = combo
@@ -482,43 +549,81 @@ def download_gee_csvs(params, combinations):
                 
             dir_output = prepare_output_directory_gee(params, country, scale, crop, var)
             admin_name, admin_id = get_admin_fields(scale)
-            for _, row in df_country.iterrows():
-                if not row[admin_name]:
-                    continue
-                region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
-                region_id = str(row[admin_id])
+            
+            gee_parallel_regions = params.parser.getboolean("DEFAULT", "gee_parallel_regions", fallback=False)
+            
+            if gee_parallel_regions:
+                bulk_csv_name = f"bulk_all_regions_{year}_{var}_{crop}"
+                matching_blobs = blob_groups.get(bulk_csv_name, [])
                 
-                base_csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}"
-                matching_blobs = blob_groups.get(base_csv_name, [])
+                bulk_csv_filename = f"{bulk_csv_name}.csv"
+                path_output = dir_output / bulk_csv_filename
                 
-                base_csv_filename = f"{base_csv_name}.csv"
-                path_output = dir_output / base_csv_filename
-                empty_path = dir_output / f"_empty_{base_csv_filename}"
-                
-                update_files_to_merge = []
-                
-                for blob in matching_blobs:
-                    csv_name = blob.name.split("/")[-1]
-                    is_update = bool(re.search(r'_u\d{4}\.csv$', csv_name))
-                    download_dest = dir_output / csv_name
-                    
-                    if not is_update:
-                        if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
-                            continue
-                    else:
-                        if download_dest.exists():
-                            update_files_to_merge.append(download_dest)
-                            continue
-                            
-                    blobs_to_download.append((blob, str(download_dest), csv_name))
-                    
-                    if is_update:
-                        update_files_to_merge.append(download_dest)
+                needs_download = False
+                for _, row in df_country.iterrows():
+                    if not row[admin_name]: continue
+                    region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                    region_id = str(row[admin_id])
+                    csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
+                    if not getattr(params, 'redo', False) and not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}").exists():
+                        needs_download = True
+                        break
                         
-                format_queue.append((path_output, country, region_label, region_id, 
-                                        round(row.geometry.centroid.y, 6), 
-                                        round(row.geometry.centroid.x, 6), 
-                                        year, var, update_files_to_merge))
+                if needs_download:
+                    for blob in matching_blobs:
+                        csv_name = blob.name.split("/")[-1]
+                        download_dest = dir_output / csv_name
+                        blobs_to_download.append((blob, str(download_dest), csv_name))
+                    if matching_blobs:
+                        split_queue.append((path_output, df_country, admin_name, admin_id, year, var, crop, dir_output))
+                        
+                # Add to format_queue for all regions
+                for _, row in df_country.iterrows():
+                    if not row[admin_name]: continue
+                    region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                    region_id = str(row[admin_id])
+                    format_queue.append((dir_output / f"{region_id}_{region_label}_{year}_{var}_{crop}.csv", country, region_label, region_id, 
+                                         round(row.geometry.centroid.y, 6), 
+                                         round(row.geometry.centroid.x, 6), 
+                                         year, var, []))
+            else:
+                for _, row in df_country.iterrows():
+                    if not row[admin_name]:
+                        continue
+                    region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                    region_id = str(row[admin_id])
+                    
+                    base_csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}"
+                    matching_blobs = blob_groups.get(base_csv_name, [])
+                    
+                    base_csv_filename = f"{base_csv_name}.csv"
+                    path_output = dir_output / base_csv_filename
+                    empty_path = dir_output / f"_empty_{base_csv_filename}"
+                    
+                    update_files_to_merge = []
+                    
+                    for blob in matching_blobs:
+                        csv_name = blob.name.split("/")[-1]
+                        is_update = bool(re.search(r'_u\d{4}\.csv$', csv_name))
+                        download_dest = dir_output / csv_name
+                        
+                        if not is_update:
+                            if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
+                                continue
+                        else:
+                            if download_dest.exists():
+                                update_files_to_merge.append(download_dest)
+                                continue
+                                
+                        blobs_to_download.append((blob, str(download_dest), csv_name))
+                        
+                        if is_update:
+                            update_files_to_merge.append(download_dest)
+                            
+                    format_queue.append((path_output, country, region_label, region_id, 
+                                            round(row.geometry.centroid.y, 6), 
+                                            round(row.geometry.centroid.x, 6), 
+                                            year, var, update_files_to_merge))
                                     
         # 5. Concurrently download everything using transfer_manager.download_many
         if blobs_to_download:
@@ -549,6 +654,37 @@ def download_gee_csvs(params, combinations):
                             dest_path.rename(empty_path)
                         else:
                             total_download_count += 1
+                            
+        # 5.5 Split bulk CSVs locally
+        for sq in split_queue:
+            path_output, df_country, admin_name, admin_id, sq_year, sq_var, sq_crop, dir_output = sq
+            if path_output.exists():
+                try:
+                    import pandas as pd
+                    df_bulk = pd.read_csv(path_output)
+                    for _, row in df_country.iterrows():
+                        if not row[admin_name]: continue
+                        region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                        region_id = str(row[admin_id])
+                        
+                        if 'region_id' in df_bulk.columns:
+                            df_region = df_bulk[df_bulk['region_id'].astype(str) == str(region_id)]
+                        else:
+                            df_region = df_bulk[df_bulk['region_label'].astype(str) == str(region_label)]
+                            
+                        target_csv = dir_output / f"{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv"
+                        if df_region.empty:
+                            empty_path = dir_output / f"_empty_{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv"
+                            with open(empty_path, 'w') as f:
+                                f.write("date,region_label\\n")
+                        else:
+                            df_region.to_csv(target_csv, index=False)
+                            
+                    # Clean up the bulk CSV to save space
+                    path_output.unlink()
+                except Exception as e:
+                    params.logger.error(f"Failed to split bulk CSV {path_output}: {e}")
+                    
         # 6. Format and merge updates locally
         for fq in format_queue:
             path_output, f_country, region, region_id, lat, lon, f_year, f_var, update_files = fq

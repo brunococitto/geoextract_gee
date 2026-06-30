@@ -6,11 +6,11 @@ from .common import TaskConfig
 # --- Dataset Constants ---
 AEF_COLLECTION_ID = "GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL"
 
-def _aef_stats_feature(
+def _aef_stats_feature_batch(
     avg_img: ee.Image,
     config: TaskConfig,
     mask_threshold_percent: float,
-) -> ee.Feature:
+) -> ee.FeatureCollection:
     """
     One row per region representing the multi-year average of 
     the 64 AEF embedding bands over the crop-masked area.
@@ -18,37 +18,42 @@ def _aef_stats_feature(
     avg_img = ee.Image(avg_img)
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
-    w_raw = ee.Image(config.cropmask_asset).float().clip(config.geometry_r)
+    fc_bounds = config.geometry_r.geometry().bounds()
+    w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
     # Mask the AEF image to the crop area
-    p = avg_img.float().clip(config.geometry_r)
+    new_names = [f"aef_{i+1}" for i in range(64)]
+    
+    p = avg_img.rename(new_names).float().clip(fc_bounds)
     pf = p.updateMask(w.mask())
 
     reducer_common_parms = {
-        "geometry": config.geometry_r,
         "crs": config.reduce_crs,
         "scale": config.reduce_scale,
         "maxPixels": 1e9,
         "tileScale": 4,
-        "bestEffort": True
+        "bestEffort": True,
     }
 
-    # Returns a dict like {"A00": 0.123, "A01": 0.456, ...}
-    d_mean = pf.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        **reducer_common_parms
-    )
-    
-    props = {"region_label": config.region_label}
-    
-    # We rename the keys from A00...A63 to aef_1...aef_64 directly in the feature
-    for i in range(64):
-        gee_band = f"A{str(i).zfill(2)}"
-        target_col = f"aef_{i+1}"
-        props[target_col] = d_mean.getNumber(gee_band)
+    def _process_region(feat):
+        geom = feat.geometry()
 
-    return ee.Feature(None, ee.Dictionary(props))
+        # Returns a dict like {"A00": 0.123, "A01": 0.456, ...}
+        d_mean = pf.reduceRegion(
+            reducer=ee.Reducer.mean().unweighted(),
+            geometry=geom,
+            **reducer_common_parms
+        )
+        
+        props = ee.Dictionary({
+            "region_label": feat.get("region_label"),
+            "region_id": feat.get("region_id")
+        }).combine(d_mean)
+
+        return ee.Feature(None, props)
+
+    return ee.FeatureCollection(config.geometry_r).map(_process_region)
 
 
 def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.Task:
@@ -91,8 +96,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
 
     # We only want one row per region
     # So wrap the single average image in a single-feature FeatureCollection.
-    feat = _aef_stats_feature(avg_image, config, mask_threshold_percent)
-    col = ee.FeatureCollection([feat])
+    col = _aef_stats_feature_batch(avg_image, config, mask_threshold_percent)
 
     # just region_label and 64 AEF bands
     selectors = ["region_label"] + [f"aef_{i+1}" for i in range(64)]

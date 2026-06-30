@@ -53,13 +53,14 @@ class TaskConfig:
         year: int,
         region_label: str,
         region_id: str,
-        geometry_ee: ee.Geometry,
+        geometry_ee: ee.Geometry | ee.FeatureCollection,
         date_from: str,
         date_to: str,
         export_bucket: str,
         export_prefix: str,
         cropmask_asset: str,
         include_audit: bool = True,
+        gee_parallel_regions: bool = False,
     ):
         self.country = country
         self.crop = crop
@@ -75,6 +76,7 @@ class TaskConfig:
         self.export_prefix = export_prefix
         self.cropmask_asset = cropmask_asset
         self.include_audit = include_audit
+        self.gee_parallel_regions = gee_parallel_regions
         
         self.prj_name = self.export_prefix.split('/')[1] if self.export_prefix.startswith('gee_extract/') else 'unknown'
         
