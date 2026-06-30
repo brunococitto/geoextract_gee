@@ -295,7 +295,6 @@ def poll_gee_tasks(params):
     Polls Earth Engine until all tracked tasks finish.
     """
     import time
-    import ee
     
     start_time = time.time()
     
@@ -312,7 +311,7 @@ def poll_gee_tasks(params):
             metadata = op.get('metadata', {})
             desc = metadata.get('description')
             # The API returns newest operations first. By only adding to current_ops if it doesn't
-            # exist, we guarantee we track the newest run of a task, ignoring old failed ones!
+            # exist, we guarantee we track the newest run of a task, ignoring old failed ones
             if desc and desc not in current_ops:
                 current_ops[desc] = metadata
         
@@ -325,7 +324,7 @@ def poll_gee_tasks(params):
             metadata = current_ops.get(desc, {})
             state = metadata.get('state', 'UNKNOWN')
             
-            # Extract EECU usage (it updates in real-time for running tasks!)
+            # Extract EECU usage (it updates in real-time for running tasks)
             eecu = float(metadata.get('batchEecuUsageSeconds', 0.0))
             total_eecu_seconds += eecu
             
@@ -349,17 +348,20 @@ def poll_gee_tasks(params):
             elif state in ['FAILED', 'CANCELLED']:
                 failed_count += 1
 
+        eecu_h_pricing = params.parser.getfloat("DEFAULT", "gee_eecu_h_pricing", fallback=0.4)
+        cost = total_eecu_seconds / 60 / 60 * eecu_h_pricing
+
         params.logger.info(
             f"GEE Tasks - Active: {active_count}, "
             f"Completed: {completed_count}, Failed: {failed_count} | "
-            f"Total EECU-seconds used: {total_eecu_seconds:.2f}"
+            f"Total EECU-seconds used: {total_eecu_seconds:.2f} (Cost: ${cost:.2f})"
         )
 
         if active_count == 0:
             params.logger.info("All tracked tasks have finished processing.")
             break
             
-        # Optional: Add a timeout to prevent infinite polling (e.g. 24 hours max)
+        # Add a timeout to prevent infinite polling
         # we can set this as a parameter in config
         if (time.time() - start_time) > (24 * 3600):
             params.logger.error("Maximum polling time (24 hours) reached! Aborting poll.")
