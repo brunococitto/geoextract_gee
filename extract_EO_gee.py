@@ -5,7 +5,6 @@ Mirrors the role of ``geoprepare.extract.extract_EO`` for the geoextract_gee ext
 ``run`` orchestrates combinations; ``process_gee`` handles one combo.
 """
 
-from pandas.io import feather_format
 from __future__ import annotations
 
 import os

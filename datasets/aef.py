@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ee
-from .common import TaskConfig
+from .common import TaskConfig, transform_geometry
 
 # --- Dataset Constants ---
 AEF_COLLECTION_ID = "GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL"
@@ -18,7 +18,7 @@ def _aef_stats_feature_batch(
     avg_img = ee.Image(avg_img)
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
-    fc_bounds = config.geometry_r.geometry().bounds()
+    fc_bounds = config.geometry_r.geometry().bounds(1)
     w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
@@ -87,7 +87,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
         )
     )
     
-    config.geometry_r = config.geometry_ee.transform(aef_proj, ee.ErrorMargin(1))
+    config.geometry_r = transform_geometry(config.geometry_ee, aef_proj)
     config.reduce_crs = aef_proj.crs()
     
     # Force scale to 5600m (0.05 degrees) to match local equivalents

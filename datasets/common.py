@@ -89,3 +89,11 @@ class TaskConfig:
         self.geometry_r = None
         self.reduce_crs = None
         self.reduce_scale = None
+
+def transform_geometry(geom_or_fc, proj, error_margin=1):
+    if isinstance(geom_or_fc, ee.FeatureCollection):
+        return geom_or_fc.map(
+            lambda f: ee.Feature(f.geometry().transform(proj, ee.ErrorMargin(error_margin)), f.toDictionary())
+        )
+    else:
+        return geom_or_fc.transform(proj, ee.ErrorMargin(error_margin))

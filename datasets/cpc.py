@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ee
-from .common import TaskConfig
+from .common import TaskConfig, transform_geometry
 
 # --- Dataset Constants ---
 CPC_COLLECTION_ID = "NOAA/CPC/Temperature"
@@ -20,7 +20,7 @@ def _cpc_daily_stats_feature_batch(
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
     # We clip to the bounds of the ENTIRE feature collection to save memory on the mask computation
-    fc_bounds = config.geometry_r.geometry().bounds()
+    fc_bounds = config.geometry_r.geometry().bounds(1)
     w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
@@ -146,8 +146,8 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
         )
     )
     
-    # In parallel mode, geometry_ee is a FeatureCollection, but .transform() works on it in EE.
-    config.geometry_r = config.geometry_ee.transform(cpc_proj, ee.ErrorMargin(1))
+    # In parallel mode, geometry_ee is a FeatureCollection, but transform_geometry handles both.
+    config.geometry_r = transform_geometry(config.geometry_ee, cpc_proj)
     config.reduce_crs = cpc_proj.crs()
     config.reduce_scale = cpc_proj.nominalScale()
 

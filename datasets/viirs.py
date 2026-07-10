@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ee
-from .common import TaskConfig
+from .common import TaskConfig, transform_geometry
 
 # --- Dataset Constants ---
 VIIRS_COLLECTION_ID = "NASA/VIIRS/002/VNP09H1"
@@ -36,7 +36,7 @@ def _viirs_weekly_stats_feature_batch(
     ndvi = ndvi_raw.multiply(200).add(50).int16().rename("viirs")
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
-    fc_bounds = config.geometry_r.geometry().bounds()
+    fc_bounds = config.geometry_r.geometry().bounds(1)
     w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
@@ -157,7 +157,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
         )
     )
     
-    config.geometry_r = config.geometry_ee.transform(viirs_proj, ee.ErrorMargin(1))
+    config.geometry_r = transform_geometry(config.geometry_ee, viirs_proj)
     config.reduce_crs = viirs_proj.crs()
     # Force scale to 5600m (0.05 degrees) instead of nominalScale (500m).
     # matches resolution used locally, and instructs GEE to 

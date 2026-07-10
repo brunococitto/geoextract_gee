@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ee
-from .common import TaskConfig
+from .common import TaskConfig, transform_geometry
 
 # --- Dataset Constants ---
 CHIRPS_COLLECTION_ID = "UCSB-CHC/CHIRPS/V3/DAILY_SAT"
@@ -17,7 +17,7 @@ def _chirps_daily_stats_feature_batch(
     img = ee.Image(img)
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
-    fc_bounds = config.geometry_r.geometry().bounds()
+    fc_bounds = config.geometry_r.geometry().bounds(1)
     w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
@@ -141,7 +141,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
         )
     )
     
-    config.geometry_r = config.geometry_ee.transform(chirps_proj, ee.ErrorMargin(1))
+    config.geometry_r = transform_geometry(config.geometry_ee, chirps_proj)
     config.reduce_crs = chirps_proj.crs()
     config.reduce_scale = chirps_proj.nominalScale()
 

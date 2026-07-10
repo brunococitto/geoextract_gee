@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ee
-from .common import TaskConfig
+from .common import TaskConfig, transform_geometry
 
 # --- Dataset Constants ---
 NSIDC_COLLECTION_ID = "NASA/SMAP/SPL4SMGP/008"
@@ -20,7 +20,7 @@ def _nsidc_daily_stats_feature_batch(
     band_name = "sm_surface" if "surface" in config.var else "sm_rootzone"
 
     afi_thresh = ee.Number(float(mask_threshold_percent * 100))
-    fc_bounds = config.geometry_r.geometry().bounds()
+    fc_bounds = config.geometry_r.geometry().bounds(1)
     w_raw = ee.Image(config.cropmask_asset).float().clip(fc_bounds)
     w = w_raw.updateMask(w_raw.gt(afi_thresh))
 
@@ -144,7 +144,7 @@ def create_task(config: TaskConfig, mask_threshold_percent: float) -> ee.batch.T
         )
     )
     
-    config.geometry_r = config.geometry_ee.transform(nsidc_proj, ee.ErrorMargin(1))
+    config.geometry_r = transform_geometry(config.geometry_ee, nsidc_proj)
     config.reduce_crs = nsidc_proj.crs()
     config.reduce_scale = nsidc_proj.nominalScale()
 
