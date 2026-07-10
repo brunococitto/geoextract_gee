@@ -61,6 +61,8 @@ The GEE backend currently supports extraction for the following `geoprepare` dat
 
 ## Architecture
 
-1.  **Task Submission**: For each region and variable combination, a GEE task is created. The extraction avoids multiprocessing and instead submits tasks to the EE queue, respecting queue limits.
-2.  **Polling**: The process tracks the submitted tasks and polls Earth Engine until all tasks are marked as `COMPLETED` or `FAILED`.
-3.  **Download and Format**: Once tasks are complete, the resulting CSVs are downloaded concurrently from GCS and formatted to match the structure expected by `geomerge`.
+1.  **Task Submission**: The pipeline extracts data using one of two modes, controlled by `gee_parallel_regions` in the configuration:
+    - **Sequential Mode** (`gee_parallel_regions = False`): For each region and variable combination, a separate GEE task is created. 
+    - **Parallel Batch Mode** (`gee_parallel_regions = True`): All regions within a country are bundled into a single `ee.FeatureCollection` and processed simultaneously by GEE via `reduceRegion` mapping. This submits a single "bulk" GEE task per year/variable, drastically reducing the task queue size and avoiding quota limits.
+2.  **Polling**: The process tracks the submitted tasks and polls Earth Engine until all tasks are marked as `COMPLETED` or `FAILED`. To prevent unexpected billing, polling monitors EECU usage and cancels runaway tasks exceeding defined limits.
+3.  **Download and Format**: Once tasks are complete, the resulting CSVs are downloaded concurrently from Google Cloud Storage using `transfer_manager`. If Parallel Batch Mode was used, the bulk CSV is automatically parsed and split locally into the individual region CSVs expected by `geomerge`.
