@@ -249,7 +249,7 @@ def process_gee(val):
             
             csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
             path_output = dir_output / csv_name
-            empty_path = dir_output / f"_empty_{csv_name}"
+            empty_path = dir_output / f"_empty_{csv_name}.skip"
             
             # Check if this specific region already exists locally
             if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
@@ -311,7 +311,7 @@ def process_gee(val):
         # Check if local CSV already exists (Skip if previously downloaded)
         csv_name = f"{region_id}_{region}_{year}_{var}_{crop}.csv"
         path_output = dir_output / csv_name
-        empty_path = dir_output / f"_empty_{csv_name}"
+        empty_path = dir_output / f"_empty_{csv_name}.skip"
         
         max_date = None
         if not getattr(params, 'redo', False) and (path_output.exists() or empty_path.exists()):
@@ -564,7 +564,7 @@ def download_gee_csvs(params, combinations):
                     region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
                     region_id = str(row[admin_id])
                     csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
-                    if not getattr(params, 'redo', False) and not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}").exists():
+                    if not getattr(params, 'redo', False) and not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}.skip").exists():
                         needs_download = True
                         break
                         
@@ -597,7 +597,7 @@ def download_gee_csvs(params, combinations):
                     
                     base_csv_filename = f"{base_csv_name}.csv"
                     path_output = dir_output / base_csv_filename
-                    empty_path = dir_output / f"_empty_{base_csv_filename}"
+                    empty_path = dir_output / f"_empty_{base_csv_filename}.skip"
                     
                     update_files_to_merge = []
                     
@@ -648,8 +648,8 @@ def download_gee_csvs(params, combinations):
                         with open(dest_path, 'r') as f:
                             lines = [next(f, None) for _ in range(2)]
                         if lines[1] is None or not lines[1].strip():
-                            params.logger.warning(f"Downloaded CSV is empty: {csv_name}. Renaming with _empty_ prefix.")
-                            empty_path = dest_path.parent / f"_empty_{csv_name}"
+                            params.logger.warning(f"Downloaded CSV is empty: {csv_name}. Renaming with _empty_ prefix and .skip suffix.")
+                            empty_path = dest_path.parent / f"_empty_{csv_name}.skip"
                             dest_path.rename(empty_path)
                         else:
                             total_download_count += 1
@@ -673,7 +673,7 @@ def download_gee_csvs(params, combinations):
                             
                         target_csv = dir_output / f"{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv"
                         if df_region.empty:
-                            empty_path = dir_output / f"_empty_{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv"
+                            empty_path = dir_output / f"_empty_{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv.skip"
                             with open(empty_path, 'w') as f:
                                 f.write("date,region_label\\n")
                         else:
