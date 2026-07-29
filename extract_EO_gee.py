@@ -300,10 +300,6 @@ def process_gee(val):
     for _, row in df_country.iterrows():
         if not row[admin_name]:
             continue
-            
-        # Hardcoded filter for testing
-        if row[admin_name].lower() not in ['northern']:
-            continue
 
         region = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
         region_id = str(row[admin_id])
