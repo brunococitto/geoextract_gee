@@ -577,15 +577,19 @@ def download_gee_csvs(params, combinations):
                 bulk_csv_filename = f"{bulk_csv_name}.csv"
                 path_output = dir_output / bulk_csv_filename
                 
+                current_year = ar.now().year
                 needs_download = False
-                for _, row in df_country.iterrows():
-                    if not row[admin_name]: continue
-                    region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
-                    region_id = str(row[admin_id])
-                    csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
-                    if not getattr(params, 'redo', False) and not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}.skip").exists():
-                        needs_download = True
-                        break
+                if str(year) == str(current_year):
+                    needs_download = True
+                else:
+                    for _, row in df_country.iterrows():
+                        if not row[admin_name]: continue
+                        region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
+                        region_id = str(row[admin_id])
+                        csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
+                        if getattr(params, 'redo', False) or (not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}.skip").exists()):
+                            needs_download = True
+                            break
                         
                 if needs_download:
                     for blob in matching_blobs:
