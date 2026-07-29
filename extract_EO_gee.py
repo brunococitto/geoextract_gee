@@ -478,11 +478,13 @@ def format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
         df['doy'] = df['date'].dt.dayofyear
         df['date'] = df['date'].dt.strftime('%Y-%m-%d')
         
-        # Fill static columns for padded rows
-        static_cols = ['country', 'region', 'region_id', 'lat', 'lon', 'year']
-        for col in static_cols:
-            if col in df.columns:
-                df[col] = df[col].ffill().bfill()
+        # Fill static columns explicitly for all rows to avoid pandas casting to float
+        df['country'] = country
+        df['region'] = region
+        df['region_id'] = region_id
+        df['lat'] = lat
+        df['lon'] = lon
+        df['year'] = int(year)
 
     # Dynamically rename columns based on the variable
     rename_map = {
