@@ -320,7 +320,14 @@ def process_gee(val):
                     import pandas as pd
                     df_existing = pd.read_csv(path_output)
                     if 'date' in df_existing.columns:
-                        max_date = pd.to_datetime(df_existing['date']).max().strftime('%Y-%m-%d')
+                        val_col = f"{var}_mean" if f"{var}_mean" in df_existing.columns else 'stats_mean'
+                        if val_col in df_existing.columns:
+                            valid_df = df_existing.dropna(subset=[val_col])
+                        else:
+                            valid_df = df_existing
+                            
+                        if not valid_df.empty:
+                            max_date = pd.to_datetime(valid_df['date']).max().strftime('%Y-%m-%d')
                 except Exception as e:
                     params.logger.warning(f"Failed to read current year ({year}) existing CSV to find max date: {e}")
                     
@@ -466,8 +473,20 @@ def format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
     df['year'] = year
     df[var] = df['stats_mean']
     if 'date' in df.columns:
-        date_col = pd.to_datetime(df['date'])
-        df['doy'] = date_col.dt.dayofyear
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Pad missing DOYs to ensure 365/366 rows for geomerge
+        all_dates = pd.date_range(start=f"{year}-01-01", end=f"{year}-12-31", freq='D')
+        df = df.set_index('date').reindex(all_dates).rename_axis('date').reset_index()
+        
+        df['doy'] = df['date'].dt.dayofyear
+        df['date'] = df['date'].dt.strftime('%Y-%m-%d')
+        
+        # Fill static columns for padded rows
+        static_cols = ['country', 'region', 'region_id', 'lat', 'lon', 'year']
+        for col in static_cols:
+            if col in df.columns:
+                df[col] = df[col].ffill().bfill()
 
     # Dynamically rename columns based on the variable
     rename_map = {
