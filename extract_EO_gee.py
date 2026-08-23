@@ -25,6 +25,8 @@ from geoprepare.extract.extract_EO import (
 
 from .datasets import common
 
+STATIC_DATASETS = ['soilgrids', 'aef']
+
 def prepare_output_directory_gee(params, country: str, scale: str, crop: str, var: str) -> Path:
     """
     Create (if needed) and return the output directory for GEE CSV staging.
@@ -98,7 +100,12 @@ def process_gee_var(
     include_audit = params.parser.getboolean("DEFAULT", "gee_audit_stats")
     
     project_name = params.project_name
-    export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/{region_id}_{region}_{year}_{var}_{crop}"
+    
+    if var in STATIC_DATASETS:
+        # Static dataset: drop the year from the filename so geomerge recognizes it
+        export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{region_id}_{region}_{var}_{crop}"
+    else:
+        export_prefix = f"gee_extract/{project_name}/{country}/{scale}/{var}/{year}/{region_id}_{region}_{year}_{var}_{crop}"
     
     if var == 'aef':
         # AEF gets passed year=0 from extract_EO, so we must use the global config years.
@@ -135,6 +142,9 @@ def process_gee_var(
         cropmask_asset=cropmask_asset,
         include_audit=include_audit
     )
+
+    if var == 'soilgrids':
+        config.depth_cm = params.parser.getint("SOILGRIDS", "depth_cm", fallback=30)
 
     # 3. Check if task already exists and is RUNNING or COMPLETED
     if config.task_desc in existing_tasks:
@@ -466,6 +476,13 @@ def format_gee_csv(path_output, country, region, region_id, lat, lon, year, var)
         df.to_csv(path_output, index=False)
         return
         
+    # Static datasets have no year/doy dependency
+    if var in STATIC_DATASETS:
+        cols = ['country', 'region', 'region_id', 'soil_sand', 'soil_clay', 'soil_soc', 'soil_bdod']
+        df = df[cols]
+        df.to_csv(path_output, index=False)
+        return
+        
     df['year'] = year
     df[var] = df['stats_mean']
     if 'date' in df.columns:
@@ -569,7 +586,7 @@ def download_gee_csvs(params, combinations):
             gee_parallel_regions = params.parser.getboolean("DEFAULT", "gee_parallel_regions", fallback=False)
             
             if gee_parallel_regions:
-                bulk_csv_name = f"bulk_all_regions_{year}_{var}_{crop}"
+                bulk_csv_name = f"bulk_all_regions{'' if var in STATIC_DATASETS else '_' + str(year)}_{var}_{crop}"
                 matching_blobs = blob_groups.get(bulk_csv_name, [])
                 
                 bulk_csv_filename = f"{bulk_csv_name}.csv"
@@ -584,7 +601,7 @@ def download_gee_csvs(params, combinations):
                         if not row[admin_name]: continue
                         region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
                         region_id = str(row[admin_id])
-                        csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}.csv"
+                        csv_name = f"{region_id}_{region_label}{'' if var in STATIC_DATASETS else '_' + str(year)}_{var}_{crop}.csv"
                         if getattr(params, 'redo', False) or (not (dir_output / csv_name).exists() and not (dir_output / f"_empty_{csv_name}.skip").exists()):
                             needs_download = True
                             break
@@ -602,7 +619,8 @@ def download_gee_csvs(params, combinations):
                     if not row[admin_name]: continue
                     region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
                     region_id = str(row[admin_id])
-                    format_queue.append((dir_output / f"{region_id}_{region_label}_{year}_{var}_{crop}.csv", country, region_label, region_id, 
+                    fq_csv_name = f"{region_id}_{region_label}{'' if var in STATIC_DATASETS else '_' + str(year)}_{var}_{crop}.csv"
+                    format_queue.append((dir_output / fq_csv_name, country, region_label, region_id, 
                                          round(row.geometry.centroid.y, 6), 
                                          round(row.geometry.centroid.x, 6), 
                                          year, var, []))
@@ -613,7 +631,7 @@ def download_gee_csvs(params, combinations):
                     region_label = str(row[admin_name]).lower().replace(" ", "_").replace("/", "_")
                     region_id = str(row[admin_id])
                     
-                    base_csv_name = f"{region_id}_{region_label}_{year}_{var}_{crop}"
+                    base_csv_name = f"{region_id}_{region_label}{'' if var in STATIC_DATASETS else '_' + str(year)}_{var}_{crop}"
                     matching_blobs = blob_groups.get(base_csv_name, [])
                     
                     base_csv_filename = f"{base_csv_name}.csv"
@@ -692,7 +710,8 @@ def download_gee_csvs(params, combinations):
                         else:
                             df_region = df_bulk[df_bulk['region_label'].astype(str) == str(region_label)]
                             
-                        target_csv = dir_output / f"{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv"
+                        target_csv_name = f"{region_id}_{region_label}{'' if sq_var in STATIC_DATASETS else '_' + str(sq_year)}_{sq_var}_{sq_crop}.csv"
+                        target_csv = dir_output / target_csv_name
                         if df_region.empty:
                             empty_path = dir_output / f"_empty_{region_id}_{region_label}_{sq_year}_{sq_var}_{sq_crop}.csv.skip"
                             with open(empty_path, 'w') as f:
@@ -759,7 +778,19 @@ def run(obj):
     params.tracked_task_descs = []
 
     from geoprepare.extract.extract_EO import build_combinations
-    combinations = build_combinations(obj)
+    raw_combinations = build_combinations(obj)
+
+    # Filter combinations to keep only one entry for static datasets like soilgrids
+    combinations = []
+    seen_static = set()
+    for combo in raw_combinations:
+        var = combo[4]
+        if var in STATIC_DATASETS:
+            static_sig = (combo[1], combo[2], combo[3], var)
+            if static_sig in seen_static:
+                continue
+            seen_static.add(static_sig)
+        combinations.append(combo)
 
     # Map local paths to EE assets (hashing, uploading, and ingesting automatically)
     from .asset_manager import sync_cropmasks
