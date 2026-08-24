@@ -52,11 +52,13 @@ The GEE backend currently supports extraction for the following `geoprepare` dat
 | Dataset | Description | Notes |
 |---------|-------------|-------|
 | **AEF** (`aef`) | Alpha Earth Fraction | Extracted as a multi-year static average. The GEE dataset has different scaling and quantization compared to the raw files from Source Cooperative. |
+| **AgERA5** (`agera5_*`) | Agrometeorological indicators | Extracted from the Climate Engine Community Catalog. Currently supports `agera5_snow_thickness_lwe`. |
 | **CHIRPS** (`chirps`) | Precipitation data | |
 | **CPC** (`cpc_*`) | Temperature fallbacks | Supports `cpc_tmax`, `cpc_tmin`. |
 | **ESI** (`esi`) | Evaporative Stress Index | ESI data in GEE often has a processing lag. The pipeline extracts the last available data for the given period. Supports `esi_4wk` and `esi_12wk`. |
 | **NDVI** (`ndvi`) | Vegetation index (MODIS) | Because the GEE pipeline pulls daily observations rather than the 8-day composite blocks used by the legacy `tiles` backend, the timing and number of missing observations at the start or end of a time-series will differ. `geomerge` naturally handles linear interpolation of these gaps across year boundaries. |
 | **NSIDC** (`nsidc`) | Snow cover data (MOD10A1) | Supports `nsidc_surface` and  `nsidc_rootzone`. |
+| **SoilGrids** (`soilgrids`) | Soil properties | Extracted as a multi-year static dataset. |
 | **VIIRS** (`viirs`) | High-res VIIRS NDVI data | |
 
 ## Architecture

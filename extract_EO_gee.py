@@ -55,6 +55,8 @@ def get_dataset_handler(var: str):
         module_name = 'viirs'
     elif var == 'aef':
         module_name = 'aef'
+    elif var.startswith('agera5_'):
+        module_name = 'agera5'
     else:
         module_name = var
         
