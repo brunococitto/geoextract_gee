@@ -18,7 +18,5 @@ dev = [
     "pytest",
 ]
 
-# Map import package name to this directory (flat layout).
-[tool.setuptools]
-package-dir = {"geoextract_gee" = "."}
-packages = ["geoextract_gee"]
+[tool.setuptools.packages.find]
+include = ["geoextract_gee", "geoextract_gee.*"]

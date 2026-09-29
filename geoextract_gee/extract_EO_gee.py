@@ -238,11 +238,11 @@ def process_gee(val):
     threshold = params.parser.getboolean(country, "threshold")
     limit = geo_utils.crop_mask_limit(params, country, threshold)
 
-    tqdm.write(
-        f"GEE process combo: country={country} crop={crop} scale={scale} var={var} "
-        f"year={year} dir_output={dir_output} admin={admin_name}/{admin_id} "
-        f"rows={len(df_country)}"
-    )
+    # tqdm.write(
+    #     f"GEE process combo: country={country} crop={crop} scale={scale} var={var} "
+    #     f"year={year} dir_output={dir_output} admin={admin_name}/{admin_id} "
+    #     f"rows={len(df_country)}"
+    # )
 
     # Fetch existing tasks to skip duplicates
     # We now fetch this once in run() to avoid an expensive network call per combination
